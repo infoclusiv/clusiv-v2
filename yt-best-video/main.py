@@ -23,6 +23,7 @@ from config import (
 )
 from database import obtener_canales_db
 from extension_bridge import ExtensionBridgeServer
+import logger as log
 from youtube_analyzer import analizar_rendimiento_canal
 from ui.state import AppState
 from ui.panel_channels import PanelChannels
@@ -80,41 +81,80 @@ class WorkerAutomatizacion(QThread):
         self.journey_id = journey_id
 
     def run(self):
+        execution_context = {
+            "journey_id": self.journey_id,
+            "canal_count": len(self.canales),
+        }
+
+        log.journey_event("worker_automatizacion_start", **execution_context)
+
+        log.info("step_wait_connections", **execution_context)
         self.progreso.emit("Esperando conexión de la extensión...")
         ok, error = self.bridge.wait_for_connections(
             timeout=EXTENSION_CONNECTION_TIMEOUT_SECONDS
         )
         if not ok:
+            log.error("step_wait_connections_failed", error=error, **execution_context)
             self.error.emit(error)
             return
+        log.info("step_wait_connections_ok", **execution_context)
 
+        log.info("step_prepare_tab", **execution_context)
         self.progreso.emit("Preparando pestaña de ChatGPT...")
         ok, error = self.bridge.prepare_chatgpt_tab(
             timeout=EXTENSION_CONNECTION_TIMEOUT_SECONDS,
             tab_url_patterns=CHATGPT_TAB_PATTERNS,
         )
         if not ok:
+            log.error("step_prepare_tab_failed", error=error, **execution_context)
             self.error.emit(error)
             return
+        log.info("step_prepare_tab_ok", tab_message=error, **execution_context)
 
+        log.info("step_check_journey_exists", **execution_context)
         self.progreso.emit("Consultando journeys disponibles...")
         self.bridge.request_journeys()
         self.bridge.wait_for_journeys(timeout=4.0)
         journeys = self.bridge.get_available_journeys()
+        journey_ids = [journey.get("id") for journey in journeys]
+        log.info(
+            "step_journeys_received",
+            count=len(journeys),
+            journey_ids=journey_ids,
+            looking_for=self.journey_id,
+            **execution_context,
+        )
         if not any(journey.get("id") == self.journey_id for journey in journeys):
+            log.error(
+                "step_journey_not_found",
+                available_ids=journey_ids,
+                **execution_context,
+            )
             self.error.emit(
                 "El journey seleccionado ya no existe en la extensión. Actualiza la lista y vuelve a elegirlo."
             )
             return
+        log.info("step_journey_found", **execution_context)
 
+        log.info("step_analyze_channels", **execution_context)
         try:
             mejor = analizar_canales(self.canales, self.progreso.emit)
         except RuntimeError as exc:
+            log.error("step_analyze_channels_failed", error=str(exc), **execution_context)
             self.error.emit(str(exc))
             return
 
+        log.info(
+            "step_analyze_channels_ok",
+            winner_title=mejor.get("title"),
+            winner_views=mejor.get("views"),
+            winner_channel=mejor.get("ch_name"),
+            **execution_context,
+        )
+
         self.resultado.emit(mejor)
 
+        log.info("step_sync_ref_title", title=mejor["title"], **execution_context)
         self.progreso.emit("Sincronizando REF_TITLE con la extensión...")
         ok, error = self.bridge.sync_ref_title(
             mejor["title"],
@@ -125,14 +165,27 @@ class WorkerAutomatizacion(QThread):
             },
         )
         if not ok:
+            log.error("step_sync_ref_title_failed", error=error, **execution_context)
             self.error.emit(error)
             return
+        log.info("step_sync_ref_title_ok", **execution_context)
 
+        log.info("step_validate_journey", **execution_context)
         self.progreso.emit("Validando variables, textos y sitio antes de ejecutar...")
         ok, error, validation = self.bridge.validate_journey_execution(
             self.journey_id,
             timeout=JOURNEY_VALIDATION_TIMEOUT_SECONDS,
             tab_url_patterns=CHATGPT_TAB_PATTERNS,
+        )
+        log.info(
+            "step_validate_journey_result",
+            ok=ok,
+            error=error,
+            validation_status=validation.get("status") if validation else None,
+            missing_variables=validation.get("missing_variables") if validation else None,
+            missing_texts=validation.get("missing_texts") if validation else None,
+            page=validation.get("page") if validation else None,
+            **execution_context,
         )
         if not ok:
             details = []
@@ -154,27 +207,57 @@ class WorkerAutomatizacion(QThread):
             if details:
                 error = f"{error}\n" + "\n".join(details)
 
+            log.error("step_validate_journey_failed", error=error, **execution_context)
             self.error.emit(error)
             return
 
+        log.journey_event("step_run_journey_start", **execution_context)
         self.progreso.emit("Ejecutando journey 'Generar Titulo'...")
         ok, error, execution_id = self.bridge.run_journey(
             self.journey_id,
             tab_url_patterns=CHATGPT_TAB_PATTERNS,
         )
         if not ok:
+            log.error(
+                "step_run_journey_dispatch_failed",
+                error=error,
+                **execution_context,
+            )
             self.error.emit(error)
             return
 
+        log.journey_event(
+            "step_run_journey_dispatched",
+            execution_id=execution_id,
+            **execution_context,
+        )
+
+        log.journey_event(
+            "step_wait_completion_start",
+            execution_id=execution_id,
+            timeout=JOURNEY_EXECUTION_TIMEOUT_SECONDS,
+            **execution_context,
+        )
         ok, error = self.bridge.wait_for_journey_completion(
             execution_id,
             timeout=JOURNEY_EXECUTION_TIMEOUT_SECONDS,
             progress_callback=self.progreso.emit,
         )
         if not ok:
+            log.error(
+                "step_wait_completion_failed",
+                execution_id=execution_id,
+                error=error,
+                **execution_context,
+            )
             self.error.emit(error)
             return
 
+        log.journey_event(
+            "step_wait_completion_ok",
+            execution_id=execution_id,
+            **execution_context,
+        )
         self.progreso.emit("Journey completado correctamente.")
 
 

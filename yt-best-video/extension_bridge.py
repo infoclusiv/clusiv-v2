@@ -7,6 +7,8 @@ from typing import Callable, Optional
 
 import websockets
 
+import logger as log
+
 
 class ExtensionBridgeServer:
     def __init__(self, host, control_port, template_port):
@@ -60,12 +62,18 @@ class ExtensionBridgeServer:
         return self._template_connected_event.is_set()
 
     def wait_for_connections(self, timeout=15.0):
+        log.info("wait_for_connections_start", timeout=timeout)
         if not self._control_connected_event.wait(timeout):
+            log.error("wait_for_connections_control_timeout", timeout=timeout)
             return False, "La extension web no se conecto al canal principal (8765)."
 
+        log.info("wait_for_connections_control_ok")
+
         if not self._template_connected_event.wait(timeout):
+            log.error("wait_for_connections_template_timeout", timeout=timeout)
             return False, "La extension web no se conecto al bridge de variables (8766)."
 
+        log.info("wait_for_connections_all_ok")
         return True, None
 
     def get_available_journeys(self):
@@ -161,10 +169,17 @@ class ExtensionBridgeServer:
         asyncio.run_coroutine_threadsafe(_heartbeat_loop(), self._loop)
 
     def request_journeys(self):
+        log.info(
+            "request_journeys_called",
+            running=self._running,
+            control_connected=self.is_control_connected(),
+        )
         if not self._running or not self._loop:
+            log.error("request_journeys_no_server", error=self._last_error)
             return False, self._last_error or "El servidor WebSocket no esta corriendo."
 
         if not self.is_control_connected():
+            log.error("request_journeys_not_connected")
             return False, "La extension no esta conectada al canal principal."
 
         self._journeys_updated_event.clear()
@@ -179,15 +194,22 @@ class ExtensionBridgeServer:
         )
         try:
             future.result(timeout=2)
+            log.info("request_journeys_dispatched", request_id=request_id)
         except Exception as exc:
             self._pending_control_requests.pop(request_id, None)
             self._last_error = str(exc)
+            log.error(
+                "request_journeys_dispatch_failed",
+                request_id=request_id,
+                error=str(exc),
+            )
             return False, self._last_error
 
         return True, None
 
     def wait_for_journeys(self, timeout=4.0):
         request_id = self._latest_journeys_request_id
+        log.info("wait_for_journeys_start", timeout=timeout, request_id=request_id)
         if request_id:
             ok, error, _payload = self._wait_pending_request(
                 self._pending_control_requests,
@@ -197,18 +219,29 @@ class ExtensionBridgeServer:
             )
             self._latest_journeys_request_id = None
             if ok:
+                log.info("wait_for_journeys_ok", request_id=request_id)
                 return True, None
+            log.error("wait_for_journeys_failed", request_id=request_id, error=error)
             return False, error
 
         if self._journeys_updated_event.wait(timeout):
+            log.info("wait_for_journeys_event_ok")
             return True, None
+        log.error("wait_for_journeys_timeout", timeout=timeout)
         return False, "La extension no devolvio la lista de journeys a tiempo."
 
     def prepare_chatgpt_tab(self, timeout=15.0, tab_url_patterns=None):
+        log.info(
+            "prepare_chatgpt_tab_start",
+            timeout=timeout,
+            tab_url_patterns=tab_url_patterns,
+        )
         if not self._running or not self._loop:
+            log.error("prepare_chatgpt_tab_no_server", error=self._last_error)
             return False, self._last_error or "El servidor WebSocket no esta corriendo."
 
         if not self.is_control_connected():
+            log.error("prepare_chatgpt_tab_not_connected")
             return False, "La extension no esta conectada al canal principal."
 
         self._chatgpt_tab_ready_event.clear()
@@ -226,9 +259,15 @@ class ExtensionBridgeServer:
         )
         try:
             future.result(timeout=2)
+            log.info("prepare_chatgpt_tab_dispatched", request_id=request_id)
         except Exception as exc:
             self._pending_control_requests.pop(request_id, None)
             self._last_error = str(exc)
+            log.error(
+                "prepare_chatgpt_tab_dispatch_failed",
+                request_id=request_id,
+                error=str(exc),
+            )
             return False, self._last_error
 
         ok, error, status = self._wait_pending_request(
@@ -238,15 +277,30 @@ class ExtensionBridgeServer:
             "La extension no preparo una pestaña de ChatGPT a tiempo.",
         )
         if not ok:
+            log.error("prepare_chatgpt_tab_failed", request_id=request_id, error=error)
             return False, error
 
         status = status or {}
         if status.get("status") == "error":
-            return False, status.get("message") or "No se pudo preparar la pestaña de ChatGPT."
+            error = status.get("message") or "No se pudo preparar la pestaña de ChatGPT."
+            log.error(
+                "prepare_chatgpt_tab_failed",
+                request_id=request_id,
+                error=error,
+                status_payload=status,
+            )
+            return False, error
 
+        log.info("prepare_chatgpt_tab_success", request_id=request_id, message=status.get("message"))
         return True, status.get("message")
 
     def sync_ref_title(self, title, metadata=None, timeout=6.0):
+        log.info(
+            "sync_ref_title_start",
+            title=title,
+            metadata=metadata,
+            timeout=timeout,
+        )
         payload = {
             "action": "SYNC_TEMPLATE_VARIABLES",
             "variables": {
@@ -267,9 +321,11 @@ class ExtensionBridgeServer:
         self._register_pending_request(self._pending_template_requests, request_id)
 
         if not self._running or not self._loop:
+            log.error("sync_ref_title_no_server", error=self._last_error)
             return False, self._last_error or "WebSocket bridge is not running."
 
         if not self.is_template_connected():
+            log.error("sync_ref_title_not_connected")
             return False, "La extension no esta conectada al bridge de variables."
 
         future = asyncio.run_coroutine_threadsafe(
@@ -278,9 +334,15 @@ class ExtensionBridgeServer:
         )
         try:
             future.result(timeout=2)
+            log.info("sync_ref_title_dispatched", request_id=request_id)
         except Exception as exc:
             self._pending_template_requests.pop(request_id, None)
             self._last_error = str(exc)
+            log.error(
+                "sync_ref_title_dispatch_failed",
+                request_id=request_id,
+                error=str(exc),
+            )
             return False, self._last_error
 
         ok, error, ack = self._wait_pending_request(
@@ -290,21 +352,44 @@ class ExtensionBridgeServer:
             "La extension no confirmo la sincronizacion de REF_TITLE.",
         )
         if not ok:
+            log.error("sync_ref_title_failed", request_id=request_id, error=error)
             return False, error
 
         self._latest_template_ack = ack
 
+        log.info(
+            "sync_ref_title_ok",
+            request_id=request_id,
+            ack_updated_at=ack.get("updatedAt") if ack else None,
+            variable_names=ack.get("variableNames") if ack else None,
+        )
+
         return True, None
 
     def run_journey(self, journey_id, tab_url_patterns=None):
+        log.journey_event(
+            "run_journey_called",
+            journey_id=journey_id,
+            tab_url_patterns=tab_url_patterns,
+            control_connected=self.is_control_connected(),
+        )
         if not self._running or not self._loop:
+            log.error("run_journey_no_server", journey_id=journey_id)
             return False, self._last_error or "El servidor WebSocket no esta corriendo."
 
         if not self.is_control_connected():
+            log.error("run_journey_not_connected", journey_id=journey_id)
             return False, "La extension no esta conectada al canal principal."
 
         request_id = self._new_request_id("run-journey")
         execution_id = self._new_execution_id()
+
+        log.journey_event(
+            "run_journey_ids_assigned",
+            journey_id=journey_id,
+            execution_id=execution_id,
+            request_id=request_id,
+        )
 
         payload = {
             "action": "RUN_JOURNEY",
@@ -331,17 +416,36 @@ class ExtensionBridgeServer:
         )
         try:
             future.result(timeout=2)
+            log.journey_event(
+                "run_journey_dispatched",
+                journey_id=journey_id,
+                execution_id=execution_id,
+            )
         except Exception as exc:
             self._last_error = str(exc)
+            log.error(
+                "run_journey_dispatch_failed",
+                journey_id=journey_id,
+                execution_id=execution_id,
+                error=str(exc),
+            )
             return False, self._last_error, None
 
         return True, None, execution_id
 
     def validate_journey_execution(self, journey_id, timeout=12.0, tab_url_patterns=None):
+        log.info(
+            "validate_journey_execution_start",
+            journey_id=journey_id,
+            timeout=timeout,
+            tab_url_patterns=tab_url_patterns,
+        )
         if not self._running or not self._loop:
+            log.error("validate_journey_execution_no_server", journey_id=journey_id)
             return False, self._last_error or "El servidor WebSocket no esta corriendo.", None
 
         if not self.is_control_connected():
+            log.error("validate_journey_execution_not_connected", journey_id=journey_id)
             return False, "La extension no esta conectada al canal principal.", None
 
         self._execution_validation_event.clear()
@@ -364,9 +468,20 @@ class ExtensionBridgeServer:
         )
         try:
             future.result(timeout=2)
+            log.info(
+                "validate_journey_execution_dispatched",
+                journey_id=journey_id,
+                request_id=request_id,
+            )
         except Exception as exc:
             self._pending_control_requests.pop(request_id, None)
             self._last_error = str(exc)
+            log.error(
+                "validate_journey_execution_dispatch_failed",
+                journey_id=journey_id,
+                request_id=request_id,
+                error=str(exc),
+            )
             return False, self._last_error, None
 
         ok, error, validation = self._wait_pending_request(
@@ -376,12 +491,32 @@ class ExtensionBridgeServer:
             "La extension no devolvio el resultado de validacion a tiempo.",
         )
         if not ok:
+            log.error(
+                "validate_journey_execution_failed",
+                journey_id=journey_id,
+                request_id=request_id,
+                error=error,
+            )
             return False, error, None
 
         validation = validation or {}
         if validation.get("status") == "error":
-            return False, validation.get("message") or "La validacion del journey fallo.", validation
+            error = validation.get("message") or "La validacion del journey fallo."
+            log.error(
+                "validate_journey_execution_error_status",
+                journey_id=journey_id,
+                request_id=request_id,
+                error=error,
+                validation=validation,
+            )
+            return False, error, validation
 
+        log.info(
+            "validate_journey_execution_ok",
+            journey_id=journey_id,
+            request_id=request_id,
+            validation=validation,
+        )
         return True, None, validation
 
     def wait_for_journey_completion(
@@ -393,6 +528,13 @@ class ExtensionBridgeServer:
         completion_event = threading.Event()
         deadline = datetime.now(timezone.utc).timestamp() + timeout
         seen_messages = set()
+        last_status = None
+
+        log.journey_event(
+            "wait_for_journey_start",
+            execution_id=execution_id,
+            timeout=timeout,
+        )
 
         with self._lock:
             if execution_id not in self._journey_status:
@@ -409,26 +551,63 @@ class ExtensionBridgeServer:
                 if remaining <= 0:
                     break
 
-                completion_event.wait(timeout=min(0.5, remaining))
+                triggered = completion_event.wait(timeout=min(0.5, remaining))
 
                 status = self.get_journey_status(execution_id)
                 if status:
+                    current_status = status.get("status")
                     message = status.get("message")
+
+                    if current_status != last_status:
+                        log.journey_event(
+                            "journey_status_changed",
+                            execution_id=execution_id,
+                            old_status=last_status,
+                            new_status=current_status,
+                            message=message,
+                            event_triggered=triggered,
+                        )
+                        last_status = current_status
+
                     if message and message not in seen_messages and progress_callback:
                         progress_callback(message)
                         seen_messages.add(message)
 
-                    current_status = status.get("status")
                     if current_status == "completed":
+                        log.journey_event(
+                            "journey_completed",
+                            execution_id=execution_id,
+                            total_messages=len(seen_messages),
+                        )
                         return True, None
                     if current_status == "error":
+                        log.journey_event(
+                            "journey_failed",
+                            execution_id=execution_id,
+                            error_message=message,
+                        )
                         return False, message or "El journey fallo durante la ejecucion."
+                else:
+                    log.warning(
+                        "journey_status_not_found_in_dict",
+                        execution_id=execution_id,
+                        known_ids=list(self._journey_status.keys()),
+                    )
 
                 completion_event.clear()
         finally:
             with self._lock:
                 self._journey_completion_events.pop(execution_id, None)
 
+        elapsed = timeout - max(deadline - datetime.now(timezone.utc).timestamp(), 0)
+        log.error(
+            "journey_wait_timeout",
+            execution_id=execution_id,
+            timeout=timeout,
+            elapsed=round(elapsed, 2),
+            last_status=last_status,
+            seen_message_count=len(seen_messages),
+        )
         return False, "Timeout esperando la finalizacion del journey."
 
     def _run_server(self):
@@ -453,6 +632,12 @@ class ExtensionBridgeServer:
             self._running = False
 
     async def _start_server(self):
+        log.info(
+            "ws_server_starting",
+            control_port=self.control_port,
+            template_port=self.template_port,
+            host=self.host,
+        )
         try:
             self._control_server = await websockets.serve(
                 self._handle_control_client,
@@ -467,53 +652,98 @@ class ExtensionBridgeServer:
             self._running = True
             self._last_error = None
             self._start_heartbeat()
+            log.info(
+                "ws_server_started",
+                control_port=self.control_port,
+                template_port=self.template_port,
+            )
         except OSError as exc:
             self._running = False
             self._last_error = str(exc)
+            log.error("ws_server_failed", error=str(exc))
             self._loop.call_soon(self._loop.stop)
         finally:
             self._ready_event.set()
 
     async def _handle_control_client(self, websocket):
+        client_id = str(id(websocket))
+        log.info(
+            "control_client_connected",
+            client_id=client_id,
+            total_clients=len(self._control_clients) + 1,
+        )
         self._control_clients.add(websocket)
         self._control_connected_event.set()
 
         try:
             async for message in websocket:
                 await self._handle_control_message(message)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("control_client_error", client_id=client_id, error=str(exc))
         finally:
             self._control_clients.discard(websocket)
             if not self._control_clients:
                 self._control_connected_event.clear()
+            log.info(
+                "control_client_disconnected",
+                client_id=client_id,
+                remaining_clients=len(self._control_clients),
+            )
 
     async def _handle_template_client(self, websocket):
+        client_id = str(id(websocket))
+        log.info(
+            "template_client_connected",
+            client_id=client_id,
+            total_clients=len(self._template_clients) + 1,
+        )
         self._template_clients.add(websocket)
         self._template_connected_event.set()
 
         try:
             if self._latest_payload:
+                log.debug(
+                    "template_replaying_latest_payload",
+                    client_id=client_id,
+                    action=self._latest_payload.get("action"),
+                )
                 await websocket.send(json.dumps(self._latest_payload))
 
             async for message in websocket:
                 await self._handle_template_message(message)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("template_client_error", client_id=client_id, error=str(exc))
         finally:
             self._template_clients.discard(websocket)
             if not self._template_clients:
                 self._template_connected_event.clear()
+            log.info(
+                "template_client_disconnected",
+                client_id=client_id,
+                remaining_clients=len(self._template_clients),
+            )
 
     async def _handle_control_message(self, raw_message):
         try:
             payload = json.loads(raw_message)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            log.error(
+                "control_message_parse_error",
+                error=str(exc),
+                raw_preview=raw_message[:200],
+            )
             return
 
         action = payload.get("action")
+        log.ws_sent("received", action or "UNKNOWN", payload, port=self.control_port)
         if action == "JOURNEYS_LIST":
             journeys = payload.get("data") or []
+            log.info(
+                "journeys_list_received",
+                count=len(journeys),
+                request_id=payload.get("request_id"),
+                journey_ids=[journey.get("id") for journey in journeys],
+            )
             with self._lock:
                 self._journeys = journeys
             self._journeys_updated_event.set()
@@ -527,13 +757,24 @@ class ExtensionBridgeServer:
         if action == "JOURNEY_STATUS":
             journey_id = payload.get("journey_id")
             execution_id = payload.get("execution_id") or journey_id
+            status = payload.get("status")
+            message = payload.get("message")
+
+            log.journey_event(
+                "journey_status_received",
+                execution_id=execution_id,
+                journey_id=journey_id,
+                status=status,
+                message=message,
+            )
             if not execution_id:
+                log.error("journey_status_missing_execution_id", raw_payload=payload)
                 return
 
             with self._lock:
                 self._journey_status[execution_id] = {
-                    "status": payload.get("status"),
-                    "message": payload.get("message"),
+                    "status": status,
+                    "message": message,
                     "journey_id": journey_id,
                     "execution_id": execution_id,
                 }
@@ -542,10 +783,29 @@ class ExtensionBridgeServer:
                 completion_event = self._journey_completion_events.get(execution_id)
 
             if completion_event:
+                log.debug(
+                    "journey_completion_event_set",
+                    execution_id=execution_id,
+                    status=status,
+                )
                 completion_event.set()
+            else:
+                log.warning(
+                    "journey_completion_event_not_found",
+                    execution_id=execution_id,
+                    known_execution_ids=list(self._journey_completion_events.keys()),
+                )
             return
 
         if action == "CHATGPT_TAB_STATUS":
+            log.info(
+                "chatgpt_tab_status_received",
+                status=payload.get("status"),
+                tab_id=payload.get("tab_id"),
+                url=payload.get("url"),
+                message=payload.get("message"),
+                request_id=payload.get("request_id"),
+            )
             with self._lock:
                 self._latest_chatgpt_tab_status = payload
             self._chatgpt_tab_ready_event.set()
@@ -557,6 +817,16 @@ class ExtensionBridgeServer:
             return
 
         if action == "EXECUTION_VALIDATION_RESULT":
+            log.info(
+                "execution_validation_result_received",
+                journey_id=payload.get("journey_id"),
+                status=payload.get("status"),
+                message=payload.get("message"),
+                missing_variables=payload.get("missing_variables"),
+                missing_texts=payload.get("missing_texts"),
+                page=payload.get("page"),
+                request_id=payload.get("request_id"),
+            )
             with self._lock:
                 self._latest_execution_validation = payload
             self._execution_validation_event.set()
@@ -565,18 +835,48 @@ class ExtensionBridgeServer:
                 payload.get("request_id"),
                 payload,
             )
+            return
+
+        if action == "HEARTBEAT_ACK":
+            log.debug("heartbeat_ack_received", ts=payload.get("ts"))
+            return
+
+        log.warning(
+            "control_message_unknown_action",
+            action=action,
+            payload_keys=list(payload.keys()),
+        )
 
     async def _handle_template_message(self, raw_message):
         try:
             payload = json.loads(raw_message)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            log.error(
+                "template_message_parse_error",
+                error=str(exc),
+                raw_preview=raw_message[:200],
+            )
             return
 
+        log.ws_sent("received", payload.get("action") or "UNKNOWN", payload, port=self.template_port)
+
         if payload.get("action") != "TEMPLATE_VARIABLES_SYNCED":
+            log.warning(
+                "template_message_unknown_action",
+                action=payload.get("action"),
+                payload_keys=list(payload.keys()),
+            )
             return
 
         with self._lock:
             self._latest_template_ack = payload
+
+        log.info(
+            "template_variables_synced_received",
+            request_id=payload.get("request_id"),
+            updated_at=payload.get("updatedAt"),
+            variable_names=payload.get("variableNames"),
+        )
 
         self._resolve_pending_request(
             self._pending_template_requests,
@@ -593,19 +893,37 @@ class ExtensionBridgeServer:
             self._template_sync_event.set()
 
     async def _broadcast(self, clients, payload):
+        action = payload.get("action", "UNKNOWN")
+        port = self.control_port if clients is self._control_clients else self.template_port
+        log.ws_sent("sent", action, payload, port=port)
+
         message = json.dumps(payload)
         stale_clients = []
+        sent_count = 0
 
         for client in list(clients):
             try:
                 await client.send(message)
-            except Exception:
+                sent_count += 1
+            except Exception as exc:
+                log.warning("broadcast_client_error", action=action, error=str(exc))
                 stale_clients.append(client)
 
         for client in stale_clients:
             clients.discard(client)
 
+        if sent_count == 0:
+            log.error(
+                "broadcast_no_clients_reached",
+                action=action,
+                total_clients=len(clients),
+                port=port,
+            )
+        else:
+            log.debug("broadcast_sent", action=action, sent_to=sent_count, port=port)
+
     async def _shutdown(self):
+        log.info("ws_shutdown_start")
         for client in list(self._control_clients):
             try:
                 await client.close()
@@ -634,4 +952,5 @@ class ExtensionBridgeServer:
             self._template_server = None
 
         self._running = False
+        log.info("ws_shutdown_complete")
         self._loop.stop()
