@@ -33,6 +33,7 @@ class ExtensionBridgeServer:
         self._chatgpt_tab_ready_event = threading.Event()
         self._execution_validation_event = threading.Event()
         self._journey_status = {}
+        self._journey_completion_events = {}
         self._journeys = []
         self._latest_template_ack = None
         self._latest_chatgpt_tab_status = None
@@ -140,6 +141,24 @@ class ExtensionBridgeServer:
             future.result(timeout=2)
         except Exception:
             pass
+
+    def _start_heartbeat(self):
+        async def _heartbeat_loop():
+            while self._running:
+                try:
+                    await asyncio.sleep(20)
+                    if self._control_clients:
+                        await self._broadcast(
+                            self._control_clients,
+                            {
+                                "action": "HEARTBEAT",
+                                "ts": datetime.now(timezone.utc).timestamp(),
+                            },
+                        )
+                except Exception:
+                    pass
+
+        asyncio.run_coroutine_threadsafe(_heartbeat_loop(), self._loop)
 
     def request_journeys(self):
         if not self._running or not self._loop:
@@ -371,24 +390,44 @@ class ExtensionBridgeServer:
         timeout=90.0,
         progress_callback: Optional[Callable[[str], None]] = None,
     ):
+        completion_event = threading.Event()
         deadline = datetime.now(timezone.utc).timestamp() + timeout
         seen_messages = set()
 
-        while datetime.now(timezone.utc).timestamp() < deadline:
-            status = self.get_journey_status(execution_id)
-            if status:
-                message = status.get("message")
-                if message and message not in seen_messages and progress_callback:
-                    progress_callback(message)
-                    seen_messages.add(message)
+        with self._lock:
+            if execution_id not in self._journey_status:
+                self._journey_status[execution_id] = {
+                    "status": "queued",
+                    "message": "Esperando inicio...",
+                    "execution_id": execution_id,
+                }
+            self._journey_completion_events[execution_id] = completion_event
 
-                current_status = status.get("status")
-                if current_status == "completed":
-                    return True, None
-                if current_status == "error":
-                    return False, message or "El journey fallo durante la ejecucion."
+        try:
+            while datetime.now(timezone.utc).timestamp() < deadline:
+                remaining = deadline - datetime.now(timezone.utc).timestamp()
+                if remaining <= 0:
+                    break
 
-            threading.Event().wait(0.2)
+                completion_event.wait(timeout=min(0.5, remaining))
+
+                status = self.get_journey_status(execution_id)
+                if status:
+                    message = status.get("message")
+                    if message and message not in seen_messages and progress_callback:
+                        progress_callback(message)
+                        seen_messages.add(message)
+
+                    current_status = status.get("status")
+                    if current_status == "completed":
+                        return True, None
+                    if current_status == "error":
+                        return False, message or "El journey fallo durante la ejecucion."
+
+                completion_event.clear()
+        finally:
+            with self._lock:
+                self._journey_completion_events.pop(execution_id, None)
 
         return False, "Timeout esperando la finalizacion del journey."
 
@@ -427,6 +466,7 @@ class ExtensionBridgeServer:
             )
             self._running = True
             self._last_error = None
+            self._start_heartbeat()
         except OSError as exc:
             self._running = False
             self._last_error = str(exc)
@@ -499,6 +539,10 @@ class ExtensionBridgeServer:
                 }
                 if journey_id:
                     self._latest_execution_id_by_journey[journey_id] = execution_id
+                completion_event = self._journey_completion_events.get(execution_id)
+
+            if completion_event:
+                completion_event.set()
             return
 
         if action == "CHATGPT_TAB_STATUS":

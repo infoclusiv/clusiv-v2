@@ -18,6 +18,7 @@ from config import (
     EXTENSION_TEMPLATE_WS_PORT,
     EXTENSION_WS_HOST,
     JOURNEY_EXECUTION_TIMEOUT_SECONDS,
+    JOURNEY_VALIDATION_TIMEOUT_SECONDS,
     YOUTUBE_API_KEY,
 )
 from database import obtener_canales_db
@@ -130,7 +131,7 @@ class WorkerAutomatizacion(QThread):
         self.progreso.emit("Validando variables, textos y sitio antes de ejecutar...")
         ok, error, validation = self.bridge.validate_journey_execution(
             self.journey_id,
-            timeout=EXTENSION_CONNECTION_TIMEOUT_SECONDS,
+            timeout=JOURNEY_VALIDATION_TIMEOUT_SECONDS,
             tab_url_patterns=CHATGPT_TAB_PATTERNS,
         )
         if not ok:
