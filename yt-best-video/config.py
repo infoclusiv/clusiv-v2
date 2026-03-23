@@ -1,0 +1,18 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+DATABASE_FILE = "channels.db"
+EXTENSION_WS_HOST = os.getenv("EXTENSION_WS_HOST", "127.0.0.1")
+EXTENSION_CONTROL_WS_PORT = int(os.getenv("EXTENSION_CONTROL_WS_PORT", "8765"))
+EXTENSION_TEMPLATE_WS_PORT = int(os.getenv("EXTENSION_TEMPLATE_WS_PORT", "8766"))
+CHROME_PATH = os.getenv("CHROME_PATH")
+CHATGPT_URL = os.getenv("CHATGPT_URL", "https://chatgpt.com/")
+EXTENSION_CONNECTION_TIMEOUT_SECONDS = float(
+	os.getenv("EXTENSION_CONNECTION_TIMEOUT_SECONDS", "15")
+)
+JOURNEY_EXECUTION_TIMEOUT_SECONDS = float(
+	os.getenv("JOURNEY_EXECUTION_TIMEOUT_SECONDS", "90")
+)
